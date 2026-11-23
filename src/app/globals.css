@@ -1,0 +1,21 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-serif: "Source Serif 4", "Iowan Old Style", "Georgia", serif;
+}
+
+@layer base {
+  html { -webkit-tap-highlight-color: transparent; }
+  body { @apply bg-canvas text-ink antialiased; font-feature-settings: "cv11", "ss01"; }
+  /* Todas las cifras alineadas verticalmente */
+  table, input[type="number"], .tabular-nums, time { font-variant-numeric: tabular-nums; }
+  ::selection { background: #1E3F3233; }
+}
+
+@media print {
+  .no-print { display: none !important; }
+  body { background: #fff; }
+}
