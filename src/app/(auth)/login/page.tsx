@@ -1,9 +1,11 @@
+import Image from "next/image";
 import { Inter, Source_Serif_4 } from "next/font/google";
 import { Landmark } from "lucide-react";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { LoginForm } from "./login-form";
 import { PaymentCard } from "./payment-card";
 import { cn } from "@/lib/utils";
+import fondoBilletes from "./fondo-billetes.jpg";
 
 export const metadata = { title: "Ingresar" };
 // La marca puede cambiar desde Ajustes: no se cachea la página
@@ -71,9 +73,11 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
       </section>
 
       <aside className="relative hidden flex-col items-center justify-center overflow-hidden bg-brand px-12 py-16 lg:flex">
-        {/* Trama de cuadrícula sutil, como el papel cuadriculado de un cuaderno de cobranza */}
-        <div aria-hidden className="pointer-events-none absolute inset-0 opacity-[0.07]"
-          style={{ backgroundImage: "linear-gradient(#fff 1px, transparent 1px), linear-gradient(90deg, #fff 1px, transparent 1px)", backgroundSize: "28px 28px" }} />
+        {/* Fotografía de fondo (decorativa). Solo se descarga en escritorio: el panel no se muestra en celular. */}
+        <Image src={fondoBilletes} alt="" fill placeholder="blur" sizes="(min-width: 1024px) 60vw, 1px"
+          className="pointer-events-none select-none object-cover" />
+        {/* Velo con el verde de la marca: da contraste a la tarjeta y al texto, y mantiene la identidad del sistema */}
+        <div aria-hidden className="pointer-events-none absolute inset-0 bg-gradient-to-b from-brand/80 via-brand/70 to-brand/90" />
         <div className="relative flex w-full max-w-[440px] flex-col gap-10">
           <PaymentCard currency={brand.currency} />
           <p className="max-w-[36ch] text-[15px] leading-relaxed text-white/75">
