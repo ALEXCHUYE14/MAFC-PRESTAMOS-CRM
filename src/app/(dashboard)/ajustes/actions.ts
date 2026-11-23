@@ -104,9 +104,16 @@ export async function createUser(_: ActionResult | null, fd: FormData): Promise<
       user_metadata: { full_name: parsed.data.full_name, role: parsed.data.role, phone: str(fd.get("phone")) },
     });
     if (error || !data.user) return { ok: false, error: errorMessage(error) };
-    await admin.from("profiles").update({
-      role: parsed.data.role as UserRole, full_name: parsed.data.full_name, phone: str(fd.get("phone")), zone: str(fd.get("zone")),
-    }).eq("id", data.user.id);
+    // El trigger crea el perfil como cobrador inactivo; aquí el admin fija rol y lo activa.
+    const { error: profileError } = await admin.from("profiles").upsert({
+      id: data.user.id, role: parsed.data.role as UserRole, full_name: parsed.data.full_name,
+      phone: str(fd.get("phone")), zone: str(fd.get("zone")), active: true,
+    });
+    if (profileError) {
+      // Sin perfil activo el usuario no podría entrar: se revierte la creación.
+      await admin.auth.admin.deleteUser(data.user.id);
+      return { ok: false, error: errorMessage(profileError) };
+    }
   } catch (e) {
     return { ok: false, error: errorMessage(e) };
   }

@@ -25,6 +25,7 @@ export const CASH_CATEGORY_LABEL: Record<CashMovementCategory, string> = {
   cobro_cuota: "Cobro de cuota", desembolso: "Desembolso", inyeccion_capital: "Inyección de capital",
   gasto_operativo: "Gasto operativo", retiro_utilidad: "Retiro de utilidad",
   anulacion_pago: "Anulación de pago", ajuste: "Ajuste", otro: "Otro",
+  anulacion_prestamo: "Anulación de préstamo",
 };
 
 export const MANUAL_CASH_CATEGORIES: CashMovementCategory[] = [

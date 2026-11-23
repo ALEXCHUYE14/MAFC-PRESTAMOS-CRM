@@ -4,10 +4,16 @@ import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
 import { requireProfile } from "@/lib/auth";
 import { errorMessage, type ActionResult } from "@/lib/utils";
+import { signedUrl } from "@/lib/signed-links";
 import type {
   CreateLoanResult, FlatRateMode, Installment, InterestType, LateFeeType, LoanFrequency, LoanPortfolioView,
-  PaymentMethod, PayoffQuoteResult, RegisterPaymentResult,
+  PaymentMethod, PayoffQuoteResult, RegisterPaymentResult, VoidLoanResult, WriteOffLoanResult,
 } from "@/types/database";
+
+/** Enlace público firmado al recibo; si no se puede firmar, el cobro igual queda registrado. */
+async function receiptUrlFor(paymentId: string): Promise<string> {
+  try { return await signedUrl("recibo", paymentId); } catch { return ""; }
+}
 
 const loanSchema = z.object({
   client_id: z.guid("Seleccione un cliente"),
@@ -62,7 +68,7 @@ export async function createLoan(input: CreateLoanInput): Promise<ActionResult<C
 
 export async function registerPayment(input: {
   loanId: string; amount: number; method: PaymentMethod; notes?: string; waiveLateFee?: boolean;
-}): Promise<ActionResult<RegisterPaymentResult>> {
+}): Promise<ActionResult<RegisterPaymentResult & { receipt_url: string }>> {
   await requireProfile();
   if (!(input.amount > 0)) return { ok: false, error: "Ingrese un monto válido" };
   const supabase = await createClient();
@@ -77,7 +83,7 @@ export async function registerPayment(input: {
   revalidatePath(`/prestamos/${input.loanId}`);
   revalidatePath("/cobranzas");
   revalidatePath("/caja");
-  return { ok: true, data };
+  return { ok: true, data: { ...data, receipt_url: await receiptUrlFor(data.payment_id) } };
 }
 
 export async function getPayoffQuote(loanId: string): Promise<ActionResult<PayoffQuoteResult>> {
@@ -114,6 +120,38 @@ export async function voidPayment(paymentId: string, reason: string, loanId: str
   revalidatePath(`/prestamos/${loanId}`);
   revalidatePath("/caja");
   return { ok: true, data: undefined };
+}
+
+const loanIdSchema = z.guid("Préstamo inválido");
+const reasonSchema = z.string().trim().min(5, "Indique el motivo (mínimo 5 caracteres)").max(500, "Motivo demasiado largo (máximo 500)");
+
+/** Anula un préstamo desembolsado por error (solo admin). Ver void_loan en schema.sql. */
+export async function voidLoan(loanId: string, reason: string): Promise<ActionResult<VoidLoanResult>> {
+  await requireProfile(["admin"]);
+  const id = loanIdSchema.safeParse(loanId);
+  const why = reasonSchema.safeParse(reason);
+  if (!id.success) return { ok: false, error: id.error.issues[0]?.message ?? "Préstamo inválido" };
+  if (!why.success) return { ok: false, error: why.error.issues[0]?.message ?? "Motivo inválido" };
+  const supabase = await createClient();
+  const { data, error } = await supabase.rpc("void_loan", { p_loan_id: id.data, p_reason: why.data });
+  if (error || !data) return { ok: false, error: errorMessage(error) };
+  for (const p of ["/", "/prestamos", `/prestamos/${id.data}`, "/cobranzas", "/caja", "/reportes"]) revalidatePath(p);
+  if (data.restored_loan_id) revalidatePath(`/prestamos/${data.restored_loan_id}`);
+  return { ok: true, data };
+}
+
+/** Castiga un préstamo incobrable (solo admin): sale de la cartera activa, sin mover caja. */
+export async function writeOffLoan(loanId: string, reason: string): Promise<ActionResult<WriteOffLoanResult>> {
+  await requireProfile(["admin"]);
+  const id = loanIdSchema.safeParse(loanId);
+  const why = reasonSchema.safeParse(reason);
+  if (!id.success) return { ok: false, error: id.error.issues[0]?.message ?? "Préstamo inválido" };
+  if (!why.success) return { ok: false, error: why.error.issues[0]?.message ?? "Motivo inválido" };
+  const supabase = await createClient();
+  const { data, error } = await supabase.rpc("write_off_loan", { p_loan_id: id.data, p_reason: why.data });
+  if (error || !data) return { ok: false, error: errorMessage(error) };
+  for (const p of ["/", "/prestamos", `/prestamos/${id.data}`, "/cobranzas", "/reportes"]) revalidatePath(p);
+  return { ok: true, data };
 }
 
 export interface LoanPeek { loan: LoanPortfolioView; installments: Installment[] }

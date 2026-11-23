@@ -15,7 +15,7 @@ export type CashSessionStatus = "abierta" | "cerrada";
 export type CashMovementType = "ingreso" | "egreso";
 export type CashMovementCategory =
   | "cobro_cuota" | "desembolso" | "inyeccion_capital" | "gasto_operativo"
-  | "retiro_utilidad" | "anulacion_pago" | "ajuste" | "otro";
+  | "retiro_utilidad" | "anulacion_pago" | "ajuste" | "otro" | "anulacion_prestamo";
 export type ContactResult =
   | "contactado" | "no_contesta" | "promesa_pago" | "visita_realizada"
   | "cliente_ausente" | "numero_erroneo" | "se_niega_pagar" | "otro";
@@ -152,6 +152,13 @@ export interface Loan {
   notes: string | null;
   created_by: string | null;
   created_at: string;
+  voided_at: string | null;
+  voided_by: string | null;
+  void_reason: string | null;
+  written_off_at: string | null;
+  written_off_by: string | null;
+  written_off_amount: number | null;
+  write_off_reason: string | null;
 }
 
 export interface Installment {
@@ -193,6 +200,7 @@ export interface Payment {
   voided_at: string | null;
   voided_by: string | null;
   void_reason: string | null;
+  refinanced_by_loan_id: string | null;
 }
 
 export interface PaymentAllocation {
@@ -363,6 +371,9 @@ type Table<Row, Required extends keyof Row = never> = {
 type View<Row> = { Row: Plain<Row>; Relationships: [] };
 type Fn<Args, Returns> = { Args: Args; Returns: Returns };
 
+export interface VoidLoanResult { loan_id: string; returned_to_cash: number; restored_loan_id: string | null }
+export interface WriteOffLoanResult { loan_id: string; written_off_amount: number }
+
 export type Database = {
   public: {
     Tables: {
@@ -404,6 +415,8 @@ export type Database = {
       }, RegisterPaymentResult & { total: number; interest_waived: number }>;
       get_payoff_quote: Fn<{ p_loan_id: string; p_waive_future_interest?: boolean }, PayoffQuoteResult>;
       void_payment: Fn<{ p_payment_id: string; p_reason: string }, undefined>;
+      void_loan: Fn<{ p_loan_id: string; p_reason: string }, VoidLoanResult>;
+      write_off_loan: Fn<{ p_loan_id: string; p_reason: string }, WriteOffLoanResult>;
       refresh_late_fees: Fn<{ p_loan_id: string }, undefined>;
       refresh_all_late_fees: Fn<Record<string, never>, number>;
       recompute_client_score: Fn<{ p_client_id: string }, number>;

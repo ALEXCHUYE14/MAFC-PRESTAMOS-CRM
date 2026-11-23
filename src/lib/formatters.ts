@@ -95,6 +95,13 @@ export function renderTemplate(template: string, vars: TemplateVars): string {
   });
 }
 
+/** Oculta un documento de identidad dejando visibles solo los 3 últimos caracteres. */
+export function maskDocument(doc: string | null | undefined): string {
+  const d = (doc ?? "").trim();
+  if (d.length <= 3) return "•••";
+  return "•".repeat(Math.min(d.length - 3, 8)) + d.slice(-3);
+}
+
 export function initials(name: string): string {
   return name.split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0]?.toUpperCase()).join("");
 }

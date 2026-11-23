@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/services/finance/__tests__/*.test.ts"
+    "test": "tsx --conditions=react-server --test src/services/finance/__tests__/*.test.ts src/lib/__tests__/*.test.ts"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.4",

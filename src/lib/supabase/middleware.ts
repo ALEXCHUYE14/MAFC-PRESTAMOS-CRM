@@ -2,7 +2,8 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 import type { Database } from "@/types/database";
 
-const PUBLIC_PATHS = ["/login"];
+// "/v/" = recibos y estados de cuenta públicos; cada página verifica su enlace firmado.
+const PUBLIC_PATHS = ["/login", "/v/"];
 
 export async function updateSession(request: NextRequest) {
   let response = NextResponse.next({ request });

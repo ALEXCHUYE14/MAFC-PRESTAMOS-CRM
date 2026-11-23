@@ -46,8 +46,10 @@ exception when duplicate_object then null; end $$;
 do $$ begin
   create type cash_movement_category as enum (
     'cobro_cuota', 'desembolso', 'inyeccion_capital', 'gasto_operativo',
-    'retiro_utilidad', 'anulacion_pago', 'ajuste', 'otro');
+    'retiro_utilidad', 'anulacion_pago', 'ajuste', 'otro', 'anulacion_prestamo');
 exception when duplicate_object then null; end $$;
+-- Bases creadas antes de existir este valor
+alter type cash_movement_category add value if not exists 'anulacion_prestamo';
 do $$ begin
   create type contact_result as enum (
     'contactado', 'no_contesta', 'promesa_pago', 'visita_realizada',
@@ -126,21 +128,21 @@ create table if not exists public.profiles (
 );
 
 -- Crea el perfil automáticamente al registrarse un usuario.
--- El primer usuario del sistema se convierte en admin.
+-- SEGURIDAD: raw_user_meta_data lo controla quien se registra (auth.signUp con la clave
+-- anon pública), así que NUNCA se toma de ahí el rol ni el estado. Todo usuario nuevo
+-- nace como cobrador INACTIVO; solo el admin (Ajustes → Usuarios, con service role)
+-- asigna rol y activa. Excepción: el primer usuario del sistema es admin activo.
 create or replace function public.handle_new_user()
 returns trigger language plpgsql security definer set search_path = public as $$
-declare v_role user_role;
+declare v_first boolean;
 begin
-  if not exists (select 1 from public.profiles) then
-    v_role := 'admin';
-  else
-    v_role := coalesce((new.raw_user_meta_data ->> 'role')::user_role, 'cobrador');
-  end if;
-  insert into public.profiles (id, full_name, phone, role)
+  v_first := not exists (select 1 from public.profiles);
+  insert into public.profiles (id, full_name, phone, role, active)
   values (new.id,
-          coalesce(new.raw_user_meta_data ->> 'full_name', split_part(new.email, '@', 1)),
-          new.raw_user_meta_data ->> 'phone',
-          v_role)
+          left(coalesce(nullif(trim(new.raw_user_meta_data ->> 'full_name'), ''), split_part(new.email, '@', 1)), 120),
+          left(new.raw_user_meta_data ->> 'phone', 30),
+          case when v_first then 'admin'::user_role else 'cobrador'::user_role end,
+          v_first)
   on conflict (id) do nothing;
   return new;
 end $$;
@@ -256,6 +258,15 @@ create table if not exists public.loans (
   created_by        uuid references public.profiles (id) default auth.uid(),
   created_at        timestamptz not null default now()
 );
+-- Anulación y castigo (también en bases creadas antes de estas columnas)
+alter table public.loans
+  add column if not exists voided_at          timestamptz,
+  add column if not exists voided_by          uuid references public.profiles (id),
+  add column if not exists void_reason        text,
+  add column if not exists written_off_at     timestamptz,
+  add column if not exists written_off_by     uuid references public.profiles (id),
+  add column if not exists written_off_amount numeric(14,2),
+  add column if not exists write_off_reason   text;
 create index if not exists loans_client_idx on public.loans (client_id);
 create index if not exists loans_status_idx on public.loans (status);
 
@@ -305,6 +316,9 @@ create table if not exists public.payments (
   voided_by            uuid references public.profiles (id),
   void_reason          text
 );
+-- Vincula el pago de refinanciación con el préstamo que lo originó
+alter table public.payments
+  add column if not exists refinanced_by_loan_id uuid references public.loans (id);
 create index if not exists payments_loan_idx on public.payments (loan_id);
 create index if not exists payments_paid_at_idx on public.payments (paid_at);
 
@@ -316,6 +330,16 @@ create table if not exists public.payment_allocations (
   interest       numeric(14,2) not null default 0,
   principal      numeric(14,2) not null default 0
 );
+
+-- Detalle por cuota de lo condonado en cada pago, para poder revertirlo exactamente
+create table if not exists public.payment_waivers (
+  id             uuid primary key default gen_random_uuid(),
+  payment_id     uuid not null references public.payments (id) on delete cascade,
+  installment_id uuid not null references public.installments (id),
+  late_fee       numeric(14,2) not null default 0,
+  interest       numeric(14,2) not null default 0
+);
+create index if not exists payment_waivers_payment_idx on public.payment_waivers (payment_id);
 
 -- -----------------------------------------------------------------------------
 -- 6. BITÁCORA DE COBRANZA
@@ -873,9 +897,10 @@ begin
 
   -- Cierre del préstamo anterior con un pago de tipo refinanciamiento (sin caja)
   if p_previous_loan_id is not null and v_payoff > 0 then
-    insert into public.payments (loan_id, client_id, amount, payment_method, is_payoff, notes, cash_session_id)
+    insert into public.payments (loan_id, client_id, amount, payment_method, is_payoff, notes, cash_session_id,
+                                 refinanced_by_loan_id)
     values (p_previous_loan_id, p_client_id, v_payoff, 'refinanciamiento', true,
-            'Refinanciado con ' || v_code, v_session)
+            'Refinanciado con ' || v_code, v_session, v_loan_id)
     returning id into v_pay_id;
     declare v_applied jsonb;
     begin
@@ -941,10 +966,19 @@ begin
     if not (s.allow_late_fee_waiver and public.has_role('admin', 'cajero')) then
       raise exception 'No autorizado para condonar mora' using errcode = '42501';
     end if;
-    select coalesce(sum(late_fee_due - late_fee_paid - late_fee_waived), 0) into v_waived
-      from public.installments where loan_id = p_loan_id and status in ('pendiente', 'parcial');
-    update public.installments set late_fee_waived = late_fee_due - late_fee_paid
-     where loan_id = p_loan_id and status in ('pendiente', 'parcial');
+    -- Se guarda lo condonado por cuota para poder revertirlo exactamente si se anula el pago
+    create temp table if not exists _waive (
+      installment_id uuid primary key, late_fee numeric not null default 0, interest numeric not null default 0
+    ) on commit drop;
+    truncate _waive;
+    insert into _waive (installment_id, late_fee)
+    select id, late_fee_due - late_fee_paid - late_fee_waived
+      from public.installments
+     where loan_id = p_loan_id and status in ('pendiente', 'parcial')
+       and late_fee_due - late_fee_paid - late_fee_waived > 0;
+    select coalesce(sum(late_fee), 0) into v_waived from _waive;
+    update public.installments i set late_fee_waived = i.late_fee_waived + w.late_fee
+      from _waive w where w.installment_id = i.id;
   end if;
 
   if not s.allow_partial_payments then
@@ -970,6 +1004,11 @@ begin
                                late_fee_waived, is_payoff)
   values (p_loan_id, l.client_id, round(p_amount, 2), p_method, p_notes, v_session, v_waived, p_amount = v_owed)
   returning id, code into v_pay_id, v_code;
+
+  if v_waived > 0 then
+    insert into public.payment_waivers (payment_id, installment_id, late_fee)
+    select v_pay_id, installment_id, late_fee from _waive;
+  end if;
 
   v_applied := public.apply_cascade(p_loan_id, v_pay_id, round(p_amount, 2));
   update public.payments
@@ -1025,6 +1064,7 @@ declare
   v_waived_int numeric := 0;
   v_total numeric;
   v_res jsonb;
+  v_pay_id uuid;
 begin
   if (p_waive_late_fee or p_waive_future_interest) and not public.has_role('admin', 'cajero') then
     raise exception 'No autorizado para condonar' using errcode = '42501';
@@ -1034,11 +1074,16 @@ begin
   perform public.refresh_late_fees(p_loan_id);
 
   if p_waive_future_interest then
-    select coalesce(sum(interest_due - interest_paid - interest_waived), 0) into v_waived_int
+    create temp table if not exists _iwaive (installment_id uuid primary key, interest numeric not null) on commit drop;
+    truncate _iwaive;
+    insert into _iwaive (installment_id, interest)
+    select id, interest_due - interest_paid - interest_waived
       from public.installments
-     where loan_id = p_loan_id and status in ('pendiente', 'parcial') and due_date > v_today;
-    update public.installments set interest_waived = interest_due - interest_paid
-     where loan_id = p_loan_id and status in ('pendiente', 'parcial') and due_date > v_today;
+     where loan_id = p_loan_id and status in ('pendiente', 'parcial') and due_date > v_today
+       and interest_due - interest_paid - interest_waived > 0;
+    select coalesce(sum(interest), 0) into v_waived_int from _iwaive;
+    update public.installments i set interest_waived = i.interest_waived + w.interest
+      from _iwaive w where w.installment_id = i.id;
   end if;
 
   select coalesce(sum(principal_due + interest_due + late_fee_due - principal_paid - interest_paid
@@ -1054,8 +1099,12 @@ begin
 
   v_res := public.register_loan_payment(p_loan_id, v_total, p_method,
              coalesce(p_notes, 'Liquidación anticipada'), p_waive_late_fee);
-  update public.payments set is_payoff = true, interest_waived = v_waived_int
-   where id = (v_res ->> 'payment_id')::uuid;
+  v_pay_id := (v_res ->> 'payment_id')::uuid;
+  update public.payments set is_payoff = true, interest_waived = v_waived_int where id = v_pay_id;
+  if v_waived_int > 0 then
+    insert into public.payment_waivers (payment_id, installment_id, interest)
+    select v_pay_id, installment_id, interest from _iwaive;
+  end if;
   return v_res || jsonb_build_object('interest_waived', v_waived_int, 'total', v_total);
 end $$;
 
@@ -1075,7 +1124,7 @@ begin
     raise exception 'Los pagos por refinanciamiento no se anulan; anule el préstamo nuevo';
   end if;
   if exists (select 1 from public.loans where id = p.loan_id and status not in ('activo', 'pagado')) then
-    raise exception 'El préstamo está refinanciado o anulado; no se puede anular el pago';
+    raise exception 'El préstamo está refinanciado, anulado o castigado; no se puede anular el pago';
   end if;
   if coalesce(trim(p_reason), '') = '' then raise exception 'Indique el motivo de anulación'; end if;
   perform 1 from public.loans where id = p.loan_id for update;
@@ -1088,12 +1137,25 @@ begin
            paid_at = null
      where id = a.installment_id;
   end loop;
-  if p.late_fee_waived > 0 then
-    update public.installments set late_fee_waived = 0
-     where loan_id = p.loan_id and status in ('pendiente', 'parcial', 'pagado');
-  end if;
-  if p.interest_waived > 0 then
-    update public.installments set interest_waived = 0 where loan_id = p.loan_id;
+
+  if exists (select 1 from public.payment_waivers where payment_id = p_payment_id) then
+    -- Revierte SOLO lo que condonó este pago (no toca condonaciones de otros pagos)
+    update public.installments i
+       set late_fee_waived = greatest(0, i.late_fee_waived - w.late_fee),
+           interest_waived = greatest(0, i.interest_waived - w.interest)
+      from (select installment_id, sum(late_fee) as late_fee, sum(interest) as interest
+              from public.payment_waivers where payment_id = p_payment_id
+             group by installment_id) w
+     where i.id = w.installment_id;
+  else
+    -- Pagos registrados antes de existir payment_waivers: comportamiento anterior
+    if p.late_fee_waived > 0 then
+      update public.installments set late_fee_waived = 0
+       where loan_id = p.loan_id and status in ('pendiente', 'parcial', 'pagado');
+    end if;
+    if p.interest_waived > 0 then
+      update public.installments set interest_waived = 0 where loan_id = p.loan_id;
+    end if;
   end if;
 
   update public.payments
@@ -1112,6 +1174,115 @@ begin
             'Anulación ' || p.code || ': ' || p_reason, p.loan_id, p.id);
   end if;
   perform public.recompute_client_score(p.client_id);
+end $$;
+
+-- Anular préstamo (solo admin). Para desembolsos por error: exige que no tenga pagos
+-- vigentes, devuelve el neto a caja y, si era una refinanciación, reactiva el anterior.
+create or replace function public.void_loan(p_loan_id uuid, p_reason text)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare
+  s         public.system_settings;
+  l         public.loans;
+  v_prev    public.loans;
+  v_refi    public.payments;
+  v_session uuid := public.current_cash_session();
+  v_reason  text := trim(coalesce(p_reason, ''));
+  a         record;
+begin
+  if not public.has_role('admin') then
+    raise exception 'Solo el administrador puede anular préstamos' using errcode = '42501';
+  end if;
+  if length(v_reason) < 5 then raise exception 'Indique el motivo de anulación (mínimo 5 caracteres)'; end if;
+  select * into s from public.system_settings where id = 1;
+  select * into l from public.loans where id = p_loan_id for update;
+  if l.id is null then raise exception 'Préstamo inexistente'; end if;
+  if l.status <> 'activo' then
+    raise exception 'Solo se pueden anular préstamos activos (estado actual: %)', l.status;
+  end if;
+  if exists (select 1 from public.payments where loan_id = p_loan_id and not voided) then
+    raise exception 'El préstamo tiene pagos vigentes. Anule primero esos pagos';
+  end if;
+  if l.net_disbursed > 0 and s.require_open_cash and v_session is null then
+    raise exception 'Debe abrir caja para registrar la devolución del desembolso';
+  end if;
+
+  -- Si era una refinanciación, se revierte el pago que cerró el préstamo anterior
+  if l.previous_loan_id is not null and l.refinanced_balance > 0 then
+    select * into v_prev from public.loans where id = l.previous_loan_id for update;
+    if v_prev.status <> 'refinanciado' then
+      raise exception 'El préstamo anterior (%) ya no está en estado refinanciado; no se puede revertir', v_prev.code;
+    end if;
+    select * into v_refi from public.payments
+     where loan_id = l.previous_loan_id and payment_method = 'refinanciamiento' and not voided
+       and (refinanced_by_loan_id = l.id
+            or (refinanced_by_loan_id is null and notes = 'Refinanciado con ' || l.code))
+     order by paid_at desc limit 1
+     for update;
+    if v_refi.id is null then
+      raise exception 'No se encontró el pago de refinanciación del préstamo anterior (%)', v_prev.code;
+    end if;
+    for a in select * from public.payment_allocations where payment_id = v_refi.id loop
+      update public.installments
+         set late_fee_paid = late_fee_paid - a.late_fee,
+             interest_paid = interest_paid - a.interest,
+             principal_paid = principal_paid - a.principal,
+             paid_at = null
+       where id = a.installment_id;
+    end loop;
+    update public.payments
+       set voided = true, voided_at = now(), voided_by = auth.uid(),
+           void_reason = 'Anulación de ' || l.code || ': ' || v_reason
+     where id = v_refi.id;
+    update public.loans set status = 'activo', closed_at = null where id = v_prev.id;
+    perform public.update_installment_status(v_prev.id);
+    perform public.sync_loan_totals(v_prev.id);
+    perform public.refresh_late_fees(v_prev.id);
+  end if;
+
+  update public.loans
+     set status = 'anulado', closed_at = now(), voided_at = now(), voided_by = auth.uid(), void_reason = v_reason
+   where id = p_loan_id;
+
+  if l.net_disbursed > 0 then
+    insert into public.cash_movements (cash_session_id, movement_type, category, amount, description, loan_id)
+    values (v_session, 'ingreso', 'anulacion_prestamo', l.net_disbursed,
+            'Anulación ' || l.code || ': ' || v_reason, l.id);
+  end if;
+
+  perform public.recompute_client_score(l.client_id);
+  return jsonb_build_object('loan_id', l.id, 'returned_to_cash', l.net_disbursed,
+                            'restored_loan_id', v_prev.id);
+end $$;
+
+-- Castigar préstamo incobrable (solo admin): lo saca de la cartera activa sin mover caja
+create or replace function public.write_off_loan(p_loan_id uuid, p_reason text)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare
+  l        public.loans;
+  v_amount numeric;
+  v_reason text := trim(coalesce(p_reason, ''));
+begin
+  if not public.has_role('admin') then
+    raise exception 'Solo el administrador puede castigar préstamos' using errcode = '42501';
+  end if;
+  if length(v_reason) < 5 then raise exception 'Indique el motivo del castigo (mínimo 5 caracteres)'; end if;
+  select * into l from public.loans where id = p_loan_id for update;
+  if l.id is null then raise exception 'Préstamo inexistente'; end if;
+  if l.status <> 'activo' then
+    raise exception 'Solo se pueden castigar préstamos activos (estado actual: %)', l.status;
+  end if;
+  perform public.refresh_late_fees(p_loan_id);
+  select coalesce(sum(principal_due + interest_due - principal_paid - interest_paid - interest_waived), 0)
+    into v_amount
+    from public.installments where loan_id = p_loan_id and status in ('pendiente', 'parcial');
+
+  update public.loans
+     set status = 'castigado', closed_at = now(), written_off_at = now(), written_off_by = auth.uid(),
+         written_off_amount = v_amount, write_off_reason = v_reason
+   where id = p_loan_id;
+
+  perform public.recompute_client_score(l.client_id);
+  return jsonb_build_object('loan_id', l.id, 'written_off_amount', v_amount);
 end $$;
 
 -- Caja: apertura, movimiento manual y cierre con arqueo
@@ -1336,6 +1507,7 @@ alter table public.loans               enable row level security;
 alter table public.installments        enable row level security;
 alter table public.payments            enable row level security;
 alter table public.payment_allocations enable row level security;
+alter table public.payment_waivers     enable row level security;
 alter table public.collection_notes    enable row level security;
 alter table public.cash_sessions       enable row level security;
 alter table public.cash_movements      enable row level security;
@@ -1409,6 +1581,8 @@ create policy installments_read on public.installments for select to authenticat
 create policy payments_read on public.payments for select to authenticated using (public.can_access_loan(loan_id));
 create policy allocations_read on public.payment_allocations for select to authenticated
   using (exists (select 1 from public.payments p where p.id = payment_id and public.can_access_loan(p.loan_id)));
+create policy waivers_read on public.payment_waivers for select to authenticated
+  using (exists (select 1 from public.payments p where p.id = payment_id and public.can_access_loan(p.loan_id)));
 
 -- Bitácora de cobranza
 create policy notes_read on public.collection_notes for select to authenticated
@@ -1430,17 +1604,20 @@ create policy audit_read on public.audit_logs for select to authenticated using 
 -- automáticamente a las tablas creadas por SQL; sin esto toda lectura falla con 42501.
 -- Qué filas ve/modifica cada usuario lo siguen decidiendo las políticas RLS de arriba.
 -- anon no recibe nada: el sistema exige iniciar sesión.
-grant usage on schema public to authenticated;
+grant usage on schema public to authenticated, service_role;
 grant select, insert, update, delete on all tables in schema public to authenticated;
 grant usage, select on all sequences in schema public to authenticated;
 revoke all on all tables in schema public from anon;
 revoke all on all sequences in schema public from anon;
 -- La auditoría solo se escribe por trigger: nadie la modifica directamente.
 revoke insert, update, delete on public.audit_logs from authenticated;
+-- service_role (solo servidor: creación de usuarios y enlaces públicos firmados)
+grant all on all tables in schema public to service_role;
+grant all on all sequences in schema public to service_role;
 
 -- Permisos de ejecución de RPCs: nada para anon; internas solo para el propio motor
 revoke execute on all functions in schema public from public, anon;
-grant execute on all functions in schema public to authenticated;
+grant execute on all functions in schema public to authenticated, service_role;
 revoke execute on function public.apply_cascade(uuid, uuid, numeric) from public, anon, authenticated;
 revoke execute on function public.sync_loan_totals(uuid) from public, anon, authenticated;
 revoke execute on function public.update_installment_status(uuid) from public, anon, authenticated;
@@ -1476,6 +1653,21 @@ do $$ begin
 exception when others then null; end $$;
 
 -- =============================================================================
--- 16. TAREA PROGRAMADA OPCIONAL (pg_cron): refrescar mora cada madrugada
---   select cron.schedule('refresh-late-fees', '0 6 * * *', $$select public.refresh_all_late_fees()$$);
+-- 16. MORA AUTOMÁTICA (pg_cron): recálculo cada hora, para que el cambio de día
+--     sea correcto en cualquier zona horaria. Si pg_cron no está disponible,
+--     actívelo en Database → Extensions y vuelva a ejecutar este bloque.
 -- =============================================================================
+do $cron$
+begin
+  create extension if not exists pg_cron;
+exception when others then
+  raise notice 'pg_cron no disponible (%). Actívelo en Database → Extensions y vuelva a ejecutar.', sqlerrm;
+end $cron$;
+
+do $cron$
+begin
+  if exists (select 1 from pg_extension where extname = 'pg_cron') then
+    perform cron.unschedule(jobid) from cron.job where jobname = 'refresh-late-fees';
+    perform cron.schedule('refresh-late-fees', '7 * * * *', 'select public.refresh_all_late_fees()');
+  end if;
+end $cron$;

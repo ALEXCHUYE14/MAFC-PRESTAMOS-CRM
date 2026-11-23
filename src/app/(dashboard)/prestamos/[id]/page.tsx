@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { FileText, MessageCircle, Printer, RefreshCcw, UserRound } from "lucide-react";
+import { FileText, MessageCircle, Printer, RefreshCcw, Send, UserRound } from "lucide-react";
 import { requireProfile, getSettings, can } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { formatDate, formatDateTime, formatMoney, renderTemplate, todayISO, whatsappLink } from "@/lib/formatters";
@@ -17,6 +17,8 @@ import { PaymentSheet } from "@/components/payments/payment-sheet";
 import { VoidPaymentButton } from "@/components/payments/void-payment-button";
 import { CollectionNoteForm } from "@/components/payments/collection-note-form";
 import { NotesTimeline } from "@/components/payments/notes-timeline";
+import { LoanAdminActions } from "@/components/loans/loan-admin-actions";
+import { signedUrl } from "@/lib/signed-links";
 import { cn } from "@/lib/utils";
 
 export default async function PrestamoPage({ params, searchParams }: {
@@ -46,6 +48,17 @@ export default async function PrestamoPage({ params, searchParams }: {
   const active = loan.status === "activo";
   const firstName = view.client_name.split(" ")[0];
   const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "";
+  const isAdmin = can(profile.role, "void_payment");
+  const hasPayments = (payments ?? []).some((p) => !p.voided);
+  const isRefinancing = Boolean(loan.previous_loan_id) && loan.refinanced_balance > 0;
+  const { data: previous } = loan.previous_loan_id
+    ? await supabase.from("loans").select("code").eq("id", loan.previous_loan_id).maybeSingle()
+    : { data: null };
+  // Enlace público firmado al estado de cuenta (el cliente lo abre sin cuenta). Si no se puede
+  // firmar (falta el secreto en el servidor), simplemente no se muestra el botón.
+  const statementUrl = await signedUrl("estado", loan.id).catch(() => "");
+  const statementMsg = `Hola ${firstName}, le compartimos el estado de cuenta de su préstamo ${loan.code}: ${statementUrl}
+${settings.business_name}`;
 
   const welcome = renderTemplate(settings.templates.bienvenida, {
     cliente: firstName, negocio: settings.business_name, monto_cuota: m(loan.installment_amount),
@@ -71,6 +84,11 @@ export default async function PrestamoPage({ params, searchParams }: {
             <a href={whatsappLink(view.phone, sp.nuevo ? welcome : reminder, settings.phone_country_code)} target="_blank" rel="noreferrer"
               className={buttonVariants({ variant: "secondary" })}><MessageCircle strokeWidth={1.75} />{sp.nuevo ? "Enviar bienvenida" : view.days_overdue > 0 ? "Aviso de mora" : "Recordatorio"}</a>
             <Link href={`/estado-cuenta/${loan.id}`} target="_blank" className={buttonVariants({ variant: "secondary" })}><FileText strokeWidth={1.75} />Estado de cuenta</Link>
+            {statementUrl && (
+              <a href={whatsappLink(view.phone, statementMsg, settings.phone_country_code)} target="_blank" rel="noreferrer"
+                className={buttonVariants({ variant: "secondary" })} title="Envía al cliente un enlace seguro (vigencia 30 días)">
+                <Send strokeWidth={1.75} />Enviar estado</a>
+            )}
             {active && can(profile.role, "disburse") && (
               <Link href={`/prestamos/nuevo?cliente=${loan.client_id}&refinanciar=${loan.id}`} className={buttonVariants({ variant: "secondary" })}>
                 <RefreshCcw strokeWidth={1.75} />Refinanciar</Link>
@@ -85,9 +103,26 @@ export default async function PrestamoPage({ params, searchParams }: {
                 receiptTemplate: settings.templates.recibo, appUrl,
               }} />
             )}
+            {active && isAdmin && (
+              <LoanAdminActions loanId={loan.id} loanCode={loan.code} netDisbursed={loan.net_disbursed} balanceDue={loan.balance_due}
+                hasPayments={hasPayments} isRefinancing={isRefinancing} previousCode={previous?.code ?? null} />
+            )}
           </>
         }
       />
+      {loan.status === "anulado" && (
+        <div className="mb-4"><Alert tone="danger">
+          Préstamo <strong>anulado</strong>{loan.voided_at ? ` el ${formatDateTime(loan.voided_at, settings.timezone)}` : ""}
+          {loan.voided_by ? ` por ${authors[loan.voided_by] ?? "—"}` : ""}. Motivo: {loan.void_reason ?? "—"}
+        </Alert></div>
+      )}
+      {loan.status === "castigado" && (
+        <div className="mb-4"><Alert tone="danger">
+          Préstamo <strong>castigado</strong> por <strong className="tabular-nums">{m(loan.written_off_amount ?? 0)}</strong>
+          {loan.written_off_at ? ` el ${formatDateTime(loan.written_off_at, settings.timezone)}` : ""}
+          {loan.written_off_by ? ` por ${authors[loan.written_off_by] ?? "—"}` : ""}. Motivo: {loan.write_off_reason ?? "—"}
+        </Alert></div>
+      )}
       {sp.nuevo && (
         <div className="mb-4"><Alert tone="ok">
           Préstamo desembolsado. Neto entregado: <strong className="tabular-nums">{m(loan.net_disbursed)}</strong>

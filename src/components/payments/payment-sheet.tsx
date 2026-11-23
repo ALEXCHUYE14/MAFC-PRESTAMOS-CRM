@@ -51,7 +51,7 @@ export function PaymentSheet({ ctx, trigger, triggerProps }: { ctx: PaymentConte
   const [notes, setNotes] = useState("");
   const [waive, setWaive] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [done, setDone] = useState<RegisterPaymentResult | null>(null);
+  const [done, setDone] = useState<(RegisterPaymentResult & { receipt_url: string }) | null>(null);
   const [pending, start] = useTransition();
 
   const balances = useMemo(() => {
@@ -95,7 +95,8 @@ export function PaymentSheet({ ctx, trigger, triggerProps }: { ctx: PaymentConte
     if (!o) { setDone(null); setAmount(""); setNotes(""); setWaive(false); setError(null); }
   };
 
-  const receiptUrl = done ? `${ctx.appUrl}/recibo/${done.payment_id}` : "";
+  // Enlace público firmado generado en el servidor (el cliente lo abre sin cuenta)
+  const receiptUrl = done?.receipt_url ?? "";
   const waMessage = done ? renderTemplate(ctx.receiptTemplate, {
     cliente: ctx.clientName.split(" ")[0], negocio: ctx.businessName, saldo_total: fmt(done.balance_due), link_recibo: receiptUrl,
   }) : "";
