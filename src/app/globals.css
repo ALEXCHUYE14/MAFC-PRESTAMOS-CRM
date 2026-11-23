@@ -13,6 +13,13 @@
   /* Todas las cifras alineadas verticalmente */
   table, input[type="number"], .tabular-nums, time { font-variant-numeric: tabular-nums; }
   ::selection { background: #1E3F3233; }
+
+  /* Los elementos de una cuadrícula no pueden ensancharla más allá de su contenedor.
+     Sin esto, una columna implícita (grids sin columnas en móvil) se estira hasta el ancho
+     de un texto truncado o una tabla, la página se desborda a la derecha y en iPhone/Android
+     la barra inferior fija queda cortada. :where() = especificidad 0 (cualquier utilidad
+     min-w-* la sobrescribe). */
+  :where(.grid) > * { min-width: 0; }
 }
 
 /* Login: los sellos de la tarjeta de pagos se estampan uno tras otro (única animación de la página) */

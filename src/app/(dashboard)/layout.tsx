@@ -28,9 +28,12 @@ export default async function DashboardLayout({ children }: { children: React.Re
       <div className="flex min-h-dvh">
         <Sidebar role={profile.role} userName={profile.full_name || "Usuario"} roleLabel={ROLE_LABEL[profile.role]}
           businessName={settings.business_name} signOut={signOut} />
-        <div className="flex min-w-0 flex-1 flex-col">
+        {/* overflow-x-clip: red de seguridad contra desbordes horizontales. "clip" (no "hidden")
+            para no crear un contenedor de scroll y no romper el encabezado sticky. */}
+        <div className="flex min-w-0 flex-1 flex-col overflow-x-clip">
           <MobileHeader businessName={settings.business_name} cashOpen={Boolean(session)} />
-          <main className="mx-auto w-full max-w-[1400px] flex-1 px-4 pb-28 pt-5 sm:px-6 lg:px-8 lg:pb-10 lg:pt-8">{children}</main>
+          {/* En móvil se deja espacio para la barra inferior + la zona del indicador de inicio del iPhone */}
+          <main className="mx-auto w-full max-w-[1400px] flex-1 px-4 pb-[calc(5.5rem+env(safe-area-inset-bottom))] pt-5 sm:px-6 lg:px-8 lg:pb-10 lg:pt-8">{children}</main>
         </div>
       </div>
       <Suspense><BottomNav /></Suspense>
