@@ -46,10 +46,11 @@ exception when duplicate_object then null; end $$;
 do $$ begin
   create type cash_movement_category as enum (
     'cobro_cuota', 'desembolso', 'inyeccion_capital', 'gasto_operativo',
-    'retiro_utilidad', 'anulacion_pago', 'ajuste', 'otro', 'anulacion_prestamo');
+    'retiro_utilidad', 'anulacion_pago', 'ajuste', 'otro', 'anulacion_prestamo', 'recuperacion_castigo');
 exception when duplicate_object then null; end $$;
 -- Bases creadas antes de existir este valor
 alter type cash_movement_category add value if not exists 'anulacion_prestamo';
+alter type cash_movement_category add value if not exists 'recuperacion_castigo';
 do $$ begin
   create type contact_result as enum (
     'contactado', 'no_contesta', 'promesa_pago', 'visita_realizada',
@@ -319,6 +320,9 @@ create table if not exists public.payments (
 -- Vincula el pago de refinanciación con el préstamo que lo originó
 alter table public.payments
   add column if not exists refinanced_by_loan_id uuid references public.loans (id);
+-- Pagos cobrados sobre un préstamo castigado (recuperación de cartera)
+alter table public.payments
+  add column if not exists is_recovery boolean not null default false;
 create index if not exists payments_loan_idx on public.payments (loan_id);
 create index if not exists payments_paid_at_idx on public.payments (paid_at);
 
@@ -666,14 +670,21 @@ begin
          coalesce(sum(principal_due + interest_due - principal_paid - interest_paid - interest_waived), 0)
     into v_paid, v_fee, v_bal
     from public.installments where loan_id = p_loan_id;
+  -- Un préstamo castigado que se recupera por completo pasa a 'pagado'; si luego se anula
+  -- un pago y vuelve a tener saldo, regresa a 'castigado' (no a 'activo').
   update public.loans
      set paid_amount = v_paid,
          late_fee_paid = v_fee,
          balance_due = v_bal,
-         status = case when status = 'activo' and v_bal <= 0 then 'pagado'::loan_status
-                       when status = 'pagado' and v_bal > 0 then 'activo'::loan_status
-                       else status end,
-         closed_at = case when v_bal <= 0 then coalesce(closed_at, now()) else null end
+         status = case
+           when status in ('activo', 'castigado') and v_bal <= 0 then 'pagado'::loan_status
+           when status = 'pagado' and v_bal > 0 then
+             case when written_off_at is not null then 'castigado'::loan_status else 'activo'::loan_status end
+           else status end,
+         closed_at = case
+           when v_bal <= 0 then coalesce(closed_at, now())
+           when written_off_at is not null then written_off_at
+           else null end
    where id = p_loan_id;
 end $$;
 
@@ -943,6 +954,7 @@ declare
   v_waived   numeric := 0;
   v_owed     numeric;
   v_next     numeric;
+  v_recovery boolean;
 begin
   if not public.has_role('admin', 'cajero', 'cobrador') then
     raise exception 'No autorizado' using errcode = '42501';
@@ -950,7 +962,8 @@ begin
   if p_amount is null or p_amount <= 0 then raise exception 'Monto inválido'; end if;
   select * into s from public.system_settings where id = 1;
   select * into l from public.loans where id = p_loan_id for update;
-  if l.id is null or l.status <> 'activo' then raise exception 'Préstamo no activo'; end if;
+  if l.id is null or l.status not in ('activo', 'castigado') then raise exception 'Préstamo no activo'; end if;
+  v_recovery := l.status = 'castigado';
   if public.current_user_role() = 'cobrador'
      and not exists (select 1 from public.clients where id = l.client_id and assigned_collector_id = auth.uid())
      and coalesce(l.collector_id, '00000000-0000-0000-0000-000000000000') <> auth.uid() then
@@ -960,6 +973,7 @@ begin
     raise exception 'Debe abrir caja antes de cobrar';
   end if;
 
+  -- En un castigado la mora quedó congelada al castigar (refresh_late_fees no la recalcula)
   perform public.refresh_late_fees(p_loan_id);
 
   if p_waive_late_fee then
@@ -981,7 +995,8 @@ begin
       from _waive w where w.installment_id = i.id;
   end if;
 
-  if not s.allow_partial_payments then
+  -- La regla de "sin abonos parciales" aplica a la cartera vigente, no a recuperaciones
+  if not s.allow_partial_payments and not v_recovery then
     select coalesce(sum(principal_due + interest_due + late_fee_due - principal_paid - interest_paid
                         - late_fee_paid - late_fee_waived - interest_waived), 0)
       into v_next from public.installments
@@ -1001,8 +1016,9 @@ begin
   end if;
 
   insert into public.payments (loan_id, client_id, amount, payment_method, notes, cash_session_id,
-                               late_fee_waived, is_payoff)
-  values (p_loan_id, l.client_id, round(p_amount, 2), p_method, p_notes, v_session, v_waived, p_amount = v_owed)
+                               late_fee_waived, is_payoff, is_recovery)
+  values (p_loan_id, l.client_id, round(p_amount, 2), p_method, p_notes, v_session, v_waived,
+          p_amount = v_owed, v_recovery)
   returning id, code into v_pay_id, v_code;
 
   if v_waived > 0 then
@@ -1022,13 +1038,17 @@ begin
 
   if p_method <> 'refinanciamiento' then
     insert into public.cash_movements (cash_session_id, movement_type, category, amount, description, loan_id, payment_id)
-    values (v_session, 'ingreso', 'cobro_cuota', round(p_amount, 2), 'Cobro ' || v_code || ' · ' || l.code, p_loan_id, v_pay_id);
+    values (v_session, 'ingreso',
+            case when v_recovery then 'recuperacion_castigo'::cash_movement_category else 'cobro_cuota'::cash_movement_category end,
+            round(p_amount, 2),
+            case when v_recovery then 'Recuperación ' else 'Cobro ' end || v_code || ' · ' || l.code,
+            p_loan_id, v_pay_id);
   end if;
 
   perform public.recompute_client_score(l.client_id);
 
   return jsonb_build_object('payment_id', v_pay_id, 'code', v_code, 'applied', v_applied,
-                            'late_fee_waived', v_waived,
+                            'late_fee_waived', v_waived, 'is_recovery', v_recovery,
                             'balance_due', (select balance_due from public.loans where id = p_loan_id),
                             'loan_status', (select status from public.loans where id = p_loan_id));
 end $$;
@@ -1123,8 +1143,8 @@ begin
   if p.payment_method = 'refinanciamiento' then
     raise exception 'Los pagos por refinanciamiento no se anulan; anule el préstamo nuevo';
   end if;
-  if exists (select 1 from public.loans where id = p.loan_id and status not in ('activo', 'pagado')) then
-    raise exception 'El préstamo está refinanciado, anulado o castigado; no se puede anular el pago';
+  if exists (select 1 from public.loans where id = p.loan_id and status not in ('activo', 'pagado', 'castigado')) then
+    raise exception 'El préstamo está refinanciado o anulado; no se puede anular el pago';
   end if;
   if coalesce(trim(p_reason), '') = '' then raise exception 'Indique el motivo de anulación'; end if;
   perform 1 from public.loans where id = p.loan_id for update;
@@ -1162,8 +1182,7 @@ begin
      set voided = true, voided_at = now(), voided_by = auth.uid(), void_reason = p_reason
    where id = p_payment_id;
 
-  update public.loans set status = 'activo', closed_at = null
-   where id = p.loan_id and status = 'pagado';
+  -- sync_loan_totals decide el estado: activo, castigado (si fue castigado) o pagado
   perform public.update_installment_status(p.loan_id);
   perform public.sync_loan_totals(p.loan_id);
   perform public.refresh_late_fees(p.loan_id);
@@ -1403,7 +1422,9 @@ left join lateral (
     from public.installments i
    where i.loan_id = l.id and i.status in ('pendiente', 'parcial') and i.due_date < public.business_today()) od on true;
 
-create or replace view public.v_payments_detail with (security_invoker = true) as
+-- Usa p.*: se recrea (DROP + CREATE) porque CREATE OR REPLACE falla cuando payments gana columnas
+drop view if exists public.v_payments_detail;
+create view public.v_payments_detail with (security_invoker = true) as
 select p.*, l.code as loan_code, c.first_name || ' ' || c.last_name as client_name,
        c.document_number, c.phone, pr.full_name as collector_name
 from public.payments p
@@ -1457,6 +1478,45 @@ begin
        from public.v_loan_portfolio where status = 'activo')
   ) into r;
   return r;
+end $$;
+
+-- Calidad de cartera (security invoker: el cobrador ve solo su cartera por RLS).
+-- PAR n = capital pendiente de préstamos con alguna cuota con más de n días de atraso.
+create or replace function public.get_portfolio_quality()
+returns jsonb language plpgsql stable security invoker set search_path = public as $$
+declare
+  v_today date := public.business_today();
+  v_tz    text := (select timezone from public.system_settings where id = 1);
+  v_month timestamp := date_trunc('month', public.business_today()::timestamp);
+  r       jsonb;
+begin
+  with lp as (
+    select l.id,
+           coalesce(sum(i.principal_due - i.principal_paid) filter (where i.status in ('pendiente', 'parcial')), 0) as capital,
+           coalesce(max(v_today - i.due_date) filter (where i.status in ('pendiente', 'parcial') and i.due_date < v_today), 0) as dias
+      from public.loans l
+      join public.installments i on i.loan_id = l.id
+     where l.status = 'activo'
+     group by l.id)
+  select jsonb_build_object(
+           'capital_cartera',  coalesce(sum(capital), 0),
+           'par_1',            coalesce(sum(capital) filter (where dias >= 1), 0),
+           'par_30',           coalesce(sum(capital) filter (where dias > 30), 0),
+           'par_90',           coalesce(sum(capital) filter (where dias > 90), 0),
+           'prestamos_par_1',  count(*) filter (where dias >= 1),
+           'prestamos_par_30', count(*) filter (where dias > 30),
+           'prestamos_par_90', count(*) filter (where dias > 90))
+    into r from lp;
+
+  return r || jsonb_build_object(
+    'castigado_total', coalesce((select sum(written_off_amount) from public.loans where written_off_at is not null), 0),
+    'castigado_mes',   coalesce((select sum(written_off_amount) from public.loans
+                                  where written_off_at is not null
+                                    and date_trunc('month', written_off_at at time zone v_tz) = v_month), 0),
+    'recuperado_total', coalesce((select sum(amount) from public.payments where is_recovery and not voided), 0),
+    'recuperado_mes',   coalesce((select sum(amount) from public.payments
+                                   where is_recovery and not voided
+                                     and date_trunc('month', paid_at at time zone v_tz) = v_month), 0));
 end $$;
 
 create or replace function public.report_aging()

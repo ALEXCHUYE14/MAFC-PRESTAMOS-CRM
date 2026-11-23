@@ -1,5 +1,5 @@
 import {
-  LayoutDashboard, Users, HandCoins, Route, Wallet, BarChart3, Settings, type LucideIcon,
+  LayoutDashboard, Users, HandCoins, Route, Wallet, BarChart3, ScrollText, Settings, type LucideIcon,
 } from "lucide-react";
 import type { UserRole } from "@/types/database";
 
@@ -12,6 +12,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: "/clientes", label: "Clientes", icon: Users, roles: ["admin", "cajero", "cobrador"], shortcut: "L" },
   { href: "/caja", label: "Caja", icon: Wallet, roles: ["admin", "cajero", "cobrador"], shortcut: "K" },
   { href: "/reportes", label: "Reportes", icon: BarChart3, roles: ["admin", "cajero"], shortcut: "R" },
+  { href: "/auditoria", label: "Auditoría", icon: ScrollText, roles: ["admin"] },
   { href: "/ajustes", label: "Ajustes", icon: Settings, roles: ["admin"] },
 ];
 

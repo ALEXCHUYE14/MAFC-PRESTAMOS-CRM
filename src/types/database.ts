@@ -15,7 +15,7 @@ export type CashSessionStatus = "abierta" | "cerrada";
 export type CashMovementType = "ingreso" | "egreso";
 export type CashMovementCategory =
   | "cobro_cuota" | "desembolso" | "inyeccion_capital" | "gasto_operativo"
-  | "retiro_utilidad" | "anulacion_pago" | "ajuste" | "otro" | "anulacion_prestamo";
+  | "retiro_utilidad" | "anulacion_pago" | "ajuste" | "otro" | "anulacion_prestamo" | "recuperacion_castigo";
 export type ContactResult =
   | "contactado" | "no_contesta" | "promesa_pago" | "visita_realizada"
   | "cliente_ausente" | "numero_erroneo" | "se_niega_pagar" | "otro";
@@ -201,6 +201,8 @@ export interface Payment {
   voided_by: string | null;
   void_reason: string | null;
   refinanced_by_loan_id: string | null;
+  /** Cobrado sobre un préstamo castigado (recuperación de cartera) */
+  is_recovery: boolean;
 }
 
 export interface PaymentAllocation {
@@ -337,6 +339,7 @@ export interface RegisterPaymentResult {
   code: string;
   applied: { late_fee: number; interest: number; principal: number };
   late_fee_waived: number;
+  is_recovery?: boolean;
   balance_due: number;
   loan_status: LoanStatus;
 }
@@ -370,6 +373,15 @@ type Table<Row, Required extends keyof Row = never> = {
 };
 type View<Row> = { Row: Plain<Row>; Relationships: [] };
 type Fn<Args, Returns> = { Args: Args; Returns: Returns };
+
+/** Calidad de cartera. PAR n = capital pendiente de préstamos con más de n días de atraso. */
+export interface PortfolioQuality {
+  capital_cartera: number;
+  par_1: number; par_30: number; par_90: number;
+  prestamos_par_1: number; prestamos_par_30: number; prestamos_par_90: number;
+  castigado_total: number; castigado_mes: number;
+  recuperado_total: number; recuperado_mes: number;
+}
 
 export interface VoidLoanResult { loan_id: string; returned_to_cash: number; restored_loan_id: string | null }
 export interface WriteOffLoanResult { loan_id: string; written_off_amount: number }
@@ -431,6 +443,7 @@ export type Database = {
       current_cash_session: Fn<Record<string, never>, string | null>;
       business_today: Fn<Record<string, never>, string>;
       get_dashboard_kpis: Fn<{ p_days?: number }, DashboardKpis>;
+      get_portfolio_quality: Fn<Record<string, never>, PortfolioQuality>;
       report_aging: Fn<Record<string, never>, { bucket: string; loans: number; amount: number }[]>;
       report_collections: Fn<{ p_from: string; p_to: string }, {
         fecha: string; collector_id: string | null; collector_name: string; pagos: number;

@@ -26,6 +26,7 @@ export const CASH_CATEGORY_LABEL: Record<CashMovementCategory, string> = {
   gasto_operativo: "Gasto operativo", retiro_utilidad: "Retiro de utilidad",
   anulacion_pago: "Anulación de pago", ajuste: "Ajuste", otro: "Otro",
   anulacion_prestamo: "Anulación de préstamo",
+  recuperacion_castigo: "Recuperación de castigado",
 };
 
 export const MANUAL_CASH_CATEGORIES: CashMovementCategory[] = [

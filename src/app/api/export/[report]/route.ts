@@ -28,7 +28,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ repo
       const { data } = await supabase.from("v_payments_detail").select("*").gte("paid_at", `${from}T00:00:00`).lte("paid_at", `${to}T23:59:59`).order("paid_at");
       rows = (data ?? []).map((p) => ({ recibo: p.code, fecha: p.paid_at, prestamo: p.loan_code, cliente: p.client_name, documento: p.document_number,
         monto: p.amount, mora: p.applied_to_late_fee, interes: p.applied_to_interest, capital: p.applied_to_principal, metodo: p.payment_method,
-        cobrador: p.collector_name, anulado: p.voided ? "SI" : "NO" }));
+        cobrador: p.collector_name, recuperacion: p.is_recovery ? "SI" : "NO", anulado: p.voided ? "SI" : "NO" }));
       break;
     }
     case "cartera": {

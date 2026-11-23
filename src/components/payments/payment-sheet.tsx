@@ -28,6 +28,8 @@ export interface PaymentContext {
   countryCode: string;
   receiptTemplate: string;
   appUrl: string;
+  /** Préstamo castigado: el cobro se registra como recuperación de cartera */
+  recovery?: boolean;
 }
 
 export function toBalances(rows: Installment[]): InstallmentBalance[] {
@@ -106,7 +108,7 @@ export function PaymentSheet({ ctx, trigger, triggerProps }: { ctx: PaymentConte
       <SheetTrigger asChild>
         {trigger ?? <Button {...triggerProps}><HandCoins strokeWidth={1.75} />Registrar abono</Button>}
       </SheetTrigger>
-      <SheetContent title={done ? "Pago registrado" : "Registrar abono"} description={`${ctx.clientName} · ${ctx.loanCode}`}>
+      <SheetContent title={done ? "Pago registrado" : ctx.recovery ? "Registrar recuperación" : "Registrar abono"} description={`${ctx.clientName} · ${ctx.loanCode}`}>
         {done ? (
           <div className="space-y-4">
             <div className="flex flex-col items-center py-4 text-center">
@@ -132,6 +134,9 @@ export function PaymentSheet({ ctx, trigger, triggerProps }: { ctx: PaymentConte
           </div>
         ) : (
           <div className="space-y-4">
+            {ctx.recovery && (
+              <Alert tone="warn">Préstamo <strong>castigado</strong>: este cobro se registrará como recuperación de cartera. La mora quedó congelada en la fecha del castigo.</Alert>
+            )}
             <div className="grid grid-cols-2 gap-2">
               {suggestions.map((s) => (
                 <button key={s.label} type="button" onClick={() => setAmount(fromCents(s.cents).toFixed(2))}

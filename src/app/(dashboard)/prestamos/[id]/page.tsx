@@ -49,6 +49,10 @@ export default async function PrestamoPage({ params, searchParams }: {
   const firstName = view.client_name.split(" ")[0];
   const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "";
   const isAdmin = can(profile.role, "void_payment");
+  // Un castigado sigue admitiendo cobros: se registran como recuperación de cartera
+  const isWrittenOff = loan.status === "castigado";
+  const canCollect = active || isWrittenOff;
+  const recovered = (payments ?? []).filter((p) => p.is_recovery && !p.voided).reduce((a, p) => a + p.amount, 0);
   const hasPayments = (payments ?? []).some((p) => !p.voided);
   const isRefinancing = Boolean(loan.previous_loan_id) && loan.refinanced_balance > 0;
   const { data: previous } = loan.previous_loan_id
@@ -94,13 +98,13 @@ ${settings.business_name}`;
                 <RefreshCcw strokeWidth={1.75} />Refinanciar</Link>
             )}
             {active && <PayoffSheet loanId={loan.id} loanCode={loan.code} canWaive={can(profile.role, "waive") && settings.allow_late_fee_waiver} />}
-            {active && (
-              <PaymentSheet ctx={{
+            {canCollect && (
+              <PaymentSheet triggerProps={isWrittenOff ? { variant: "secondary" } : undefined} ctx={{
                 loanId: loan.id, loanCode: loan.code, clientName: view.client_name, clientPhone: view.phone,
                 installments: installments ?? [], today, paymentOrder: settings.payment_order,
-                allowPartial: settings.allow_partial_payments, canWaive: can(profile.role, "waive") && settings.allow_late_fee_waiver,
+                allowPartial: settings.allow_partial_payments || isWrittenOff, canWaive: can(profile.role, "waive") && settings.allow_late_fee_waiver,
                 businessName: settings.business_name, countryCode: settings.phone_country_code,
-                receiptTemplate: settings.templates.recibo, appUrl,
+                receiptTemplate: settings.templates.recibo, appUrl, recovery: isWrittenOff,
               }} />
             )}
             {active && isAdmin && (
@@ -121,6 +125,13 @@ ${settings.business_name}`;
           Préstamo <strong>castigado</strong> por <strong className="tabular-nums">{m(loan.written_off_amount ?? 0)}</strong>
           {loan.written_off_at ? ` el ${formatDateTime(loan.written_off_at, settings.timezone)}` : ""}
           {loan.written_off_by ? ` por ${authors[loan.written_off_by] ?? "—"}` : ""}. Motivo: {loan.write_off_reason ?? "—"}
+          {" "}Recuperado: <strong className="tabular-nums">{m(recovered)}</strong>. Puede seguir registrando cobros de recuperación.
+        </Alert></div>
+      )}
+      {loan.status === "pagado" && loan.written_off_at && (
+        <div className="mb-4"><Alert tone="ok">
+          Préstamo castigado el {formatDateTime(loan.written_off_at, settings.timezone)} y <strong>recuperado en su totalidad</strong>
+          {" "}(<span className="tabular-nums">{m(recovered)}</span> cobrados tras el castigo).
         </Alert></div>
       )}
       {sp.nuevo && (
@@ -189,7 +200,7 @@ ${settings.business_name}`;
                     <Tr key={p.id} className={cn(p.voided && "opacity-50")}>
                       <Td className="tabular-nums font-medium">{p.code}{p.voided && <Badge tone="danger" className="ml-2">Anulado</Badge>}</Td>
                       <Td className="tabular-nums text-ink-muted">{formatDateTime(p.paid_at, settings.timezone)}</Td>
-                      <Td>{PAYMENT_METHOD_LABEL[p.payment_method]}{p.is_payoff ? <Badge tone="brand" className="ml-1">Liquidación</Badge> : null}</Td>
+                      <Td>{PAYMENT_METHOD_LABEL[p.payment_method]}{p.is_payoff ? <Badge tone="brand" className="ml-1">Liquidación</Badge> : null}{p.is_recovery ? <Badge tone="warn" className="ml-1">Recuperación</Badge> : null}</Td>
                       <Td align="right" className={cn("font-medium", p.voided && "line-through")}>{m(p.amount)}</Td>
                       <Td align="right">{m(p.applied_to_late_fee)}</Td>
                       <Td align="right">{m(p.applied_to_interest)}</Td>
@@ -214,7 +225,7 @@ ${settings.business_name}`;
         <Card>
           <CardHeader><CardTitle>Gestiones de cobranza</CardTitle></CardHeader>
           <CardContent className="space-y-6">
-            {active && <CollectionNoteForm clientId={loan.client_id} loanId={loan.id} />}
+            {canCollect && <CollectionNoteForm clientId={loan.client_id} loanId={loan.id} />}
             <NotesTimeline notes={notes ?? []} authors={authors} />
           </CardContent>
         </Card>
