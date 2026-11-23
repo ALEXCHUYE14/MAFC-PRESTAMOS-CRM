@@ -22,7 +22,11 @@ export async function updateSession(request: NextRequest) {
     },
   );
 
-  const { data: { user } } = await supabase.auth.getUser();
+  // getClaims() también refresca la sesión si el token está por vencer (escribe las cookies
+  // nuevas vía setAll) y valida la firma localmente con claves asimétricas: evita una
+  // consulta al servidor de Auth en cada navegación, prefetch y acción.
+  const { data: claimsData, error: claimsError } = await supabase.auth.getClaims();
+  const user = !claimsError && typeof claimsData?.claims?.sub === "string" ? claimsData.claims : null;
   const path = request.nextUrl.pathname;
   const isPublic = PUBLIC_PATHS.some((p) => path.startsWith(p));
 

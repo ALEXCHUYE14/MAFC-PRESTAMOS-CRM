@@ -13,7 +13,7 @@ import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/table";
 import { RouteCard } from "@/components/payments/route-card";
 import { PaymentSheet, type PaymentContext } from "@/components/payments/payment-sheet";
 import { NoteSheet } from "@/components/payments/note-sheet";
-import type { Installment, LoanPortfolioView } from "@/types/database";
+import type { LoanPortfolioView } from "@/types/database";
 
 export const metadata = { title: "Cobranzas" };
 
@@ -26,7 +26,11 @@ export default async function CobranzasPage({ searchParams }: {
   const supabase = await createClient();
   const today = todayISO(settings.timezone);
   const tab = sp.tab ?? "hoy";
-  await supabase.rpc("refresh_all_late_fees").then(() => null, () => null);
+  // Mora al día sin recalcular toda la cartera en cada visita: solo si el último cálculo
+  // es de otro día o tiene más de 15 min (el cron lo hace cada hora). Sin la migración 004,
+  // se usa el recálculo completo de antes.
+  const stale = await supabase.rpc("refresh_late_fees_if_stale", { p_max_age_minutes: 15 });
+  if (stale.error) await supabase.rpc("refresh_all_late_fees").then(() => null, () => null);
 
   const base = (head = false) => {
     let q = (head
@@ -49,7 +53,9 @@ export default async function CobranzasPage({ searchParams }: {
   const [{ data: loans }, { data: collectors }, { data: zones }, { count: hoyCount }, { count: atrCount }, { count: proxCount }, { data: todayPayments }] = await Promise.all([
     query.limit(200),
     supabase.from("profiles").select("id, full_name").eq("role", "cobrador").order("full_name"),
-    supabase.from("clients").select("zone").not("zone", "is", null),
+    // Solo las zonas distintas (antes se descargaba la zona de cada cliente)
+    supabase.from("v_client_zones").select("zone").then(async (res) =>
+      res.error ? await supabase.from("clients").select("zone").not("zone", "is", null) : res),
     base(true).lte("next_due_date", today),
     base(true).gt("days_overdue", 0),
     base(true).gt("next_due_date", today).lte("next_due_date", addDays(today, 3)),
@@ -58,18 +64,12 @@ export default async function CobranzasPage({ searchParams }: {
   ]);
 
   const list = (loans ?? []) as LoanPortfolioView[];
-  const ids = list.map((l) => l.id);
-  const { data: inst } = ids.length
-    ? await supabase.from("installments").select("*").in("loan_id", ids).in("status", ["pendiente", "parcial"]).order("installment_number")
-    : { data: [] as Installment[] };
-  const byLoan = new Map<string, Installment[]>();
-  for (const i of inst ?? []) byLoan.set(i.loan_id, [...(byLoan.get(i.loan_id) ?? []), i]);
 
   const money = settings;
   const m = (v: number) => formatMoney(v, money);
   const canWaive = can(profile.role, "waive") && settings.allow_late_fee_waiver;
   const ctxFor = (l: LoanPortfolioView): PaymentContext => ({
-    loanId: l.id, loanCode: l.code, clientName: l.client_name, clientPhone: l.phone, installments: byLoan.get(l.id) ?? [],
+    loanId: l.id, loanCode: l.code, clientName: l.client_name, clientPhone: l.phone,
     today, paymentOrder: settings.payment_order, allowPartial: settings.allow_partial_payments, canWaive,
     businessName: settings.business_name, countryCode: settings.phone_country_code, receiptTemplate: settings.templates.recibo,
     appUrl: process.env.NEXT_PUBLIC_APP_URL ?? "",

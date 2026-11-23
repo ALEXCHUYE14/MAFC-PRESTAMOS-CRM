@@ -28,9 +28,15 @@ export default async function ReportesPage({ searchParams }: { searchParams: Pro
     supabase.rpc("report_collections", { p_from: from, p_to: to }),
     supabase.rpc("report_aging"),
     supabase.rpc("report_cash_flow", { p_from: from, p_to: to }),
-    supabase.from("loans").select("net_disbursed, principal_amount").neq("status", "anulado")
-      .gte("disbursed_at", `${from}T00:00:00`).lte("disbursed_at", `${to}T23:59:59`),
+    // Suma en la base de datos (antes se descargaban todos los préstamos del periodo)
+    supabase.rpc("report_disbursements", { p_from: from, p_to: to }),
   ]);
+  // Sin la migración 004: cálculo anterior, sumando en el servidor
+  const desembolsado = disb
+    ? (disb[0]?.total ?? 0)
+    : ((await supabase.from("loans").select("net_disbursed").neq("status", "anulado")
+        .gte("disbursed_at", `${from}T00:00:00`).lte("disbursed_at", `${to}T23:59:59`)).data ?? [])
+        .reduce((a, l) => a + l.net_disbursed, 0);
 
   const byCollector = new Map<string, { name: string; pagos: number; total: number; capital: number; interes: number; mora: number }>();
   for (const r of coll ?? []) {
@@ -43,7 +49,6 @@ export default async function ReportesPage({ searchParams }: { searchParams: Pro
   const ingresos = (flow ?? []).filter((f) => f.movement_type === "ingreso").reduce((a, f) => a + f.total, 0);
   const egresos = (flow ?? []).filter((f) => f.movement_type === "egreso").reduce((a, f) => a + f.total, 0);
   const gastos = (flow ?? []).filter((f) => f.category === "gasto_operativo").reduce((a, f) => a + f.total, 0);
-  const desembolsado = (disb ?? []).reduce((a, l) => a + l.net_disbursed, 0);
   const agingTotal = (aging ?? []).reduce((a, r) => a + r.amount, 0);
 
   const Export = ({ report }: { report: string }) => (

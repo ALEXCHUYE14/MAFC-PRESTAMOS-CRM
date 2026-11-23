@@ -407,6 +407,7 @@ export type Database = {
       v_installment_status: View<InstallmentStatusView>;
       v_loan_portfolio: View<LoanPortfolioView>;
       v_payments_detail: View<PaymentDetailView>;
+      v_client_zones: View<{ zone: string }>;
     };
     Functions: {
       create_loan_with_schedule: Fn<{
@@ -431,6 +432,8 @@ export type Database = {
       write_off_loan: Fn<{ p_loan_id: string; p_reason: string }, WriteOffLoanResult>;
       refresh_late_fees: Fn<{ p_loan_id: string }, undefined>;
       refresh_all_late_fees: Fn<Record<string, never>, number>;
+      refresh_late_fees_if_stale: Fn<{ p_max_age_minutes?: number }, number>;
+      report_disbursements: Fn<{ p_from: string; p_to: string }, { total: number; capital: number; prestamos: number }[]>;
       recompute_client_score: Fn<{ p_client_id: string }, number>;
       open_cash_session: Fn<{ p_opening_amount: number; p_branch?: string }, string>;
       close_cash_session: Fn<{ p_counted_amount: number; p_notes?: string | null },

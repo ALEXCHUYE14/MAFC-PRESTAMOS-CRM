@@ -1,7 +1,7 @@
 import Image from "next/image";
 import { Inter, Source_Serif_4 } from "next/font/google";
 import { Landmark } from "lucide-react";
-import { createAdminClient } from "@/lib/supabase/admin";
+import { getSettings } from "@/lib/auth";
 import { LoginForm } from "./login-form";
 import { PaymentCard } from "./payment-card";
 import { cn } from "@/lib/utils";
@@ -27,9 +27,8 @@ interface Branding { name: string; logo: string | null; currency: string }
 async function getBranding(): Promise<Branding> {
   const fallback: Branding = { name: "Sistema de préstamos", logo: null, currency: "S/" };
   try {
-    const { data } = await createAdminClient()
-      .from("system_settings").select("business_name, logo_url, currency_symbol").eq("id", 1).maybeSingle();
-    if (!data) return fallback;
+    // Ajustes en caché compartida (sin consulta a la base en cada visita al login)
+    const data = await getSettings();
     const logo = data.logo_url && /^https:\/\//i.test(data.logo_url) ? data.logo_url : null;
     return { name: data.business_name?.trim() || fallback.name, logo, currency: data.currency_symbol?.trim() || fallback.currency };
   } catch {

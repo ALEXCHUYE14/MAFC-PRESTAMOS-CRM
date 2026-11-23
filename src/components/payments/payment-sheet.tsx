@@ -1,5 +1,5 @@
 "use client";
-import { useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { CheckCircle2, HandCoins, Loader2, MessageCircle, Printer } from "lucide-react";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
@@ -10,7 +10,7 @@ import { useMoney } from "@/components/ui/money";
 import { allocatePayment, COMPONENT_LABEL, fromCents, toCents, totalOutstanding, type InstallmentBalance, type PaymentComponent } from "@/services/finance";
 import { PAYMENT_METHOD_LABEL } from "@/lib/constants";
 import { renderTemplate, whatsappLink } from "@/lib/formatters";
-import { registerPayment } from "@/app/(dashboard)/prestamos/actions";
+import { getPendingInstallments, registerPayment } from "@/app/(dashboard)/prestamos/actions";
 import { cn } from "@/lib/utils";
 import type { Installment, PaymentMethod, RegisterPaymentResult } from "@/types/database";
 
@@ -19,7 +19,8 @@ export interface PaymentContext {
   loanCode: string;
   clientName: string;
   clientPhone: string;
-  installments: Installment[];
+  /** Si se omite, las cuotas se cargan al abrir el panel (la ruta de cobranza no las descarga todas). */
+  installments?: Installment[];
   today: string;
   paymentOrder: PaymentComponent[];
   allowPartial: boolean;
@@ -55,11 +56,26 @@ export function PaymentSheet({ ctx, trigger, triggerProps }: { ctx: PaymentConte
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<(RegisterPaymentResult & { receipt_url: string }) | null>(null);
   const [pending, start] = useTransition();
+  const [fetched, setFetched] = useState<Installment[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const source = ctx.installments ?? fetched;
+
+  // Carga diferida: solo al abrir, y solo las cuotas de este préstamo
+  useEffect(() => {
+    if (!open || ctx.installments || fetched) return;
+    let cancelled = false;
+    setLoadError(null);
+    getPendingInstallments(ctx.loanId).then((r) => {
+      if (cancelled) return;
+      if (r.ok) setFetched(r.data); else setLoadError(r.error);
+    }).catch(() => { if (!cancelled) setLoadError("No se pudieron cargar las cuotas. Revise su conexión e intente de nuevo."); });
+    return () => { cancelled = true; };
+  }, [open, ctx.installments, ctx.loanId, fetched]);
 
   const balances = useMemo(() => {
-    const b = toBalances(ctx.installments);
+    const b = toBalances(source ?? []);
     return waive ? b.map((i) => ({ ...i, lateFeeWaived: i.lateFeeDue - i.lateFeePaid })) : b;
-  }, [ctx.installments, waive]);
+  }, [source, waive]);
 
   const overdueC = balances.filter((i) => i.dueDate < ctx.today).reduce((a, i) => a + totalOutstanding([i]), 0);
   const next = balances.find((i) => i.dueDate >= ctx.today);
@@ -94,7 +110,8 @@ export function PaymentSheet({ ctx, trigger, triggerProps }: { ctx: PaymentConte
 
   const reset = (o: boolean) => {
     setOpen(o);
-    if (!o) { setDone(null); setAmount(""); setNotes(""); setWaive(false); setError(null); }
+    // Al cerrar se descartan las cuotas cargadas: al reabrir se ven los saldos actualizados
+    if (!o) { setDone(null); setAmount(""); setNotes(""); setWaive(false); setError(null); setFetched(null); setLoadError(null); }
   };
 
   // Enlace público firmado generado en el servidor (el cliente lo abre sin cuenta)
@@ -132,6 +149,17 @@ export function PaymentSheet({ ctx, trigger, triggerProps }: { ctx: PaymentConte
             </div>
             <Button variant="ghost" className="w-full" onClick={() => reset(false)}>Cerrar</Button>
           </div>
+        ) : !source ? (
+          loadError ? (
+            <div className="space-y-3">
+              <Alert tone="danger">{loadError}</Alert>
+              <Button variant="secondary" className="w-full" onClick={() => { setLoadError(null); setFetched(null); reset(false); }}>Cerrar</Button>
+            </div>
+          ) : (
+            <div className="flex justify-center py-12" role="status" aria-label="Cargando cuotas">
+              <Loader2 strokeWidth={1.75} className="size-5 animate-spin text-ink-muted" />
+            </div>
+          )
         ) : (
           <div className="space-y-4">
             {ctx.recovery && (

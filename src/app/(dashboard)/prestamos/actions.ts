@@ -154,6 +154,22 @@ export async function writeOffLoan(loanId: string, reason: string): Promise<Acti
   return { ok: true, data };
 }
 
+/**
+ * Cuotas pendientes de un préstamo, al abrir el cobro. Evita descargar por adelantado las
+ * cuotas de toda la ruta (egress). RLS limita al cobrador a su propia cartera.
+ */
+export async function getPendingInstallments(loanId: string): Promise<ActionResult<Installment[]>> {
+  await requireProfile();
+  const id = loanIdSchema.safeParse(loanId);
+  if (!id.success) return { ok: false, error: "Préstamo inválido" };
+  const supabase = await createClient();
+  await supabase.rpc("refresh_late_fees", { p_loan_id: id.data });   // mora al día para la vista previa
+  const { data, error } = await supabase.from("installments").select("*")
+    .eq("loan_id", id.data).in("status", ["pendiente", "parcial"]).order("installment_number");
+  if (error) return { ok: false, error: errorMessage(error) };
+  return { ok: true, data: data ?? [] };
+}
+
 export interface LoanPeek { loan: LoanPortfolioView; installments: Installment[] }
 
 /** Datos ligeros para el panel deslizable (slide-over) del listado. */

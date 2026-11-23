@@ -1,9 +1,9 @@
 "use server";
-import { revalidatePath } from "next/cache";
+import { revalidatePath, revalidateTag } from "next/cache";
 import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { requireProfile } from "@/lib/auth";
+import { requireProfile, SETTINGS_TAG } from "@/lib/auth";
 import { errorMessage, str, toNumber, type ActionResult } from "@/lib/utils";
 import type { FlatRateMode, InterestType, LateFeeType, LoanFrequency, PaymentComponentKey, SystemSettings, UserRole } from "@/types/database";
 
@@ -12,6 +12,7 @@ async function updateSettings(patch: Partial<SystemSettings>): Promise<ActionRes
   const supabase = await createClient();
   const { error } = await supabase.from("system_settings").update(patch).eq("id", 1);
   if (error) return { ok: false, error: errorMessage(error) };
+  revalidateTag(SETTINGS_TAG);   // los ajustes en caché se actualizan al instante
   revalidatePath("/", "layout");
   return { ok: true, data: undefined, message: "Ajustes guardados" };
 }
