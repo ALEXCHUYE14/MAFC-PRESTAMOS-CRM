@@ -1426,6 +1426,18 @@ create policy cash_movements_read on public.cash_movements for select to authent
 -- Auditoría: solo admin lee; nadie escribe directo
 create policy audit_read on public.audit_logs for select to authenticated using (public.has_role('admin'));
 
+-- Permisos a nivel de tabla. Los proyectos nuevos de Supabase NO conceden privilegios
+-- automáticamente a las tablas creadas por SQL; sin esto toda lectura falla con 42501.
+-- Qué filas ve/modifica cada usuario lo siguen decidiendo las políticas RLS de arriba.
+-- anon no recibe nada: el sistema exige iniciar sesión.
+grant usage on schema public to authenticated;
+grant select, insert, update, delete on all tables in schema public to authenticated;
+grant usage, select on all sequences in schema public to authenticated;
+revoke all on all tables in schema public from anon;
+revoke all on all sequences in schema public from anon;
+-- La auditoría solo se escribe por trigger: nadie la modifica directamente.
+revoke insert, update, delete on public.audit_logs from authenticated;
+
 -- Permisos de ejecución de RPCs: nada para anon; internas solo para el propio motor
 revoke execute on all functions in schema public from public, anon;
 grant execute on all functions in schema public to authenticated;
